@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -64,12 +65,13 @@ type SecretMirrorReconciler struct {
 // +kubebuilder:rbac:groups=platform.local.lab,resources=secretmirrors/finalizers,verbs=update
 // Secret access is granted per namespace, never cluster-wide - a controller that
 // can write a Secret anywhere can plant a fake TLS cert or pull credential in any
-// namespace. Each namespace below gets its own Role and RoleBinding. In
-// production launchpad-api renders the RoleBinding beside each sandbox namespace,
-// so access appears with the sandbox and disappears with it.
-// +kubebuilder:rbac:groups="",namespace=mirror-src,resources=secrets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",namespace=mirror-dst,resources=secrets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",namespace=mirror-dst2,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// namespace. controller-gen turns each marker into a Role in that namespace.
+//
+// Target namespaces are named by guests at creation time, so they cannot be
+// listed in a marker. The rule below generates a ClusterRole that is never bound
+// cluster-wide - launchpad-api renders a RoleBinding beside each sandbox
+// namespace, so the grant appears with the sandbox and disappears with it.
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -152,7 +154,14 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	log.Info("reconciled", "source", mirror.Spec.SourceSecret, "copies", copies, "conflicts", len(conflicts))
 
-	return ctrl.Result{}, r.setStatus(ctx, &mirror, int32(copies), ready)
+	if err := r.setStatus(ctx, &mirror, int32(copies), ready); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Copies live in namespaces nothing watches, so a copy deleted by hand is
+	// only noticed on this pass. Sandbox creation and source renewal still
+	// arrive as watch events and do not wait for it.
+	return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
 }
 
 // selectedNamespaces returns the namespaces matching the mirror's selector,

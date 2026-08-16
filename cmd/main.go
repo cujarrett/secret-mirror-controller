@@ -60,6 +60,7 @@ func main() {
 	var metricsAddr string
 	var metricsCertPath, metricsCertName, metricsCertKey string
 	var webhookCertPath, webhookCertName, webhookCertKey string
+	var sourceNamespace string
 	var enableLeaderElection bool
 	var probeAddr string
 	var secureMetrics bool
@@ -68,6 +69,8 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&sourceNamespace, "source-namespace", "demo-certs",
+		"Namespace holding the Secrets to mirror. It is the only namespace whose Secrets are watched.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -162,13 +165,21 @@ func main() {
 		// The manager caches every type it reads by listing and watching it
 		// cluster-wide, which a namespaced Secret grant will refuse. Naming the
 		// namespaces here keeps the cache inside what RBAC actually allows.
+		// Watching a type means listing it cluster-wide, which namespaced Secret
+		// access forbids. Target namespaces are named by guests at creation time
+		// and cannot be listed here, so only the source namespace is watched.
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.Secret{}: {Namespaces: map[string]cache.Config{
-					"mirror-src":  {},
-					"mirror-dst":  {},
-					"mirror-dst2": {},
+					sourceNamespace: {},
 				}},
+			},
+		},
+		// Reads of target Secrets therefore go straight to the API server, where
+		// a per-namespace RoleBinding authorises them.
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				DisableFor: []client.Object{&corev1.Secret{}},
 			},
 		},
 		Metrics:                metricsServerOptions,

@@ -20,6 +20,18 @@ rules:
   - list
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - platform.local.lab
   resources:
   - secretmirrors
@@ -45,60 +57,3 @@ rules:
   - get
   - patch
   - update
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: manager-role
-  namespace: mirror-dst
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: manager-role
-  namespace: mirror-dst2
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: manager-role
-  namespace: mirror-src
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
