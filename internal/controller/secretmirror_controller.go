@@ -272,9 +272,13 @@ func (r *SecretMirrorReconciler) pruneCopies(ctx context.Context, mirror *platfo
 
 		// Most namespaces have no Secret by this name, so NotFound here is the
 		// expected answer rather than something to retry.
+		//
+		// Forbidden is equally routine. Secret access is granted one namespace at
+		// a time, so the controller cannot read most of the cluster - and a
+		// namespace it cannot read is one it could never have written a copy to.
 		var stale corev1.Secret
 		err := r.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: mirror.Spec.SourceSecret}, &stale)
-		if apierrors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
 			continue
 		}
 		if err != nil {
