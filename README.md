@@ -1,135 +1,90 @@
 # secret-mirror-controller
-// TODO(user): Add simple overview of use/purpose
 
-## Description
-// TODO(user): An in-depth paragraph about your project and overview of use
+Copies a Secret into every namespace matching a label selector, and keeps it that way.
 
-## Getting Started
+[Launchpad](https://github.com/cujarrett/launchpad) hands each guest sandbox one of five fixed demo
+slots, and each slot owns a long-lived TLS certificate that lives in `demo-certs`. Those
+certificates have to appear inside the sandbox namespace, or cert-manager issues new ones against
+hostnames that are already at Let's Encrypt's rate limit. This controller makes that happen, and
+keeps happening - a copy deleted by hand comes back, a renewed certificate propagates, and a sandbox
+that is torn down leaves nothing behind.
 
-### Prerequisites
-- go version v1.24.6+
-- docker version 17.03+.
-- kubectl version v1.11.3+.
-- Access to a Kubernetes v1.11.3+ cluster.
+## The API
 
-### To Deploy on the cluster
-**Build and push your image to the location specified by `IMG`:**
-
-```sh
-make docker-build docker-push IMG=<some-registry>/secret-mirror-controller:tag
+```yaml
+apiVersion: platform.local.lab/v1alpha1
+kind: SecretMirror
+metadata:
+  name: demo1-tls
+  namespace: demo-certs
+spec:
+  sourceSecret: demo1-tls # a Secret in this namespace
+  targetNamespaceSelector:
+    matchLabels:
+      launchpad.local.lab/slot: demo1
 ```
 
-**NOTE:** This image ought to be published in the personal registry you specified.
-And it is required to have access to pull the image from the working environment.
-Make sure you have the proper permission to the registry if the above commands don’t work.
+Selection is by label rather than by name because guests choose their own workspace
+names. The label names the *slot*, not "is a sandbox" - the certificates are per-slot, so
+a blanket match would put slot 1's certificate in slot 3's namespace.
 
-**Install the CRDs into the cluster:**
-
-```sh
-make install
+```console
+$ kubectl get secretmirrors -A
+NAMESPACE     NAME        SOURCE      COPIES   READY   AGE
+demo-certs    demo1-tls   demo1-tls   1        True    9d
 ```
 
-**Deploy the Manager to the cluster with the image specified by `IMG`:**
+## Two rules
+
+**It never modifies a Secret it did not create.** Every copy is labelled
+`platform.local.lab/mirrored-by`. A Secret at the target name without that label is left
+untouched and reported as a conflict on the mirror's status, never overwritten.
+
+**Deleting a mirror deletes its copies.** ownerReferences cannot express this - the
+garbage collector ignores an owner in another namespace - so a finalizer holds the mirror
+in the API until the copies are gone.
+
+## Permissions
+
+The controller holds **no cluster-wide access to Secrets**. It reads its own CRs,
+lists Namespaces, and writes Events cluster-wide, and nothing else.
+
+| Grant | Scope |
+|---|---|
+| `secret-mirror-controller` | cluster-wide; SecretMirrors, Namespaces (read), Events |
+| `secret-mirror-reader` | bound in `demo-certs` only; read the source certificates |
+| `secret-mirror-writer` | bound per sandbox namespace by launchpad-api at creation time |
+
+That last binding is the interesting one. Sandbox namespaces are named by guests, so they
+cannot be listed anywhere in advance - launchpad-api renders the RoleBinding beside the
+namespace itself, so the grant appears with the sandbox and disappears with it.
+
+The same constraint shapes the watches. Watching a type means listing it cluster-wide, so
+only the source namespace's Secrets are watched (`--source-namespace`, default
+`demo-certs`); target Secrets are read directly from the API server instead of a cache. A
+new sandbox still triggers work immediately through the Namespace watch.
+
+## Running it
+
+Deployed by ArgoCD from the homelab repo at `cluster/secret-mirror-controller/`. Pushing
+to `main` builds an ARM64 image and bumps the tag there.
+
+Locally, against whatever cluster your kubeconfig points at:
 
 ```sh
-make deploy IMG=<some-registry>/secret-mirror-controller:tag
+make install                                  # apply the CRD
+go run ./cmd --source-namespace=demo-certs
 ```
 
-> **NOTE**: If you encounter RBAC errors, you may need to grant yourself cluster-admin
-privileges or be logged in as admin.
+## Development
 
-**Create instances of your solution**
-You can apply the samples (examples) from the config/sample:
+`make` is the entrypoint - see [CLAUDE.md](./CLAUDE.md) for the full table.
 
 ```sh
-kubectl apply -k config/samples/
+make generate manifests                       # after editing api/
+go test -race -skip TestControllers ./...     # fast, no envtest binaries needed
+make test                                     # full suite, downloads envtest
 ```
 
->**NOTE**: Ensure that the samples has default values to test it out.
-
-### To Uninstall
-**Delete the instances (CRs) from the cluster:**
-
-```sh
-kubectl delete -k config/samples/
-```
-
-**Delete the APIs(CRDs) from the cluster:**
-
-```sh
-make uninstall
-```
-
-**UnDeploy the controller from the cluster:**
-
-```sh
-make undeploy
-```
-
-## Project Distribution
-
-Following the options to release and provide this solution to the users.
-
-### By providing a bundle with all YAML files
-
-1. Build the installer for the image built and published in the registry:
-
-```sh
-make build-installer IMG=<some-registry>/secret-mirror-controller:tag
-```
-
-**NOTE:** The makefile target mentioned above generates an 'install.yaml'
-file in the dist directory. This file contains all the resources built
-with Kustomize, which are necessary to install this project without its
-dependencies.
-
-2. Using the installer
-
-Users can just run 'kubectl apply -f <URL for YAML BUNDLE>' to install
-the project, i.e.:
-
-```sh
-kubectl apply -f https://raw.githubusercontent.com/<org>/secret-mirror-controller/<tag or branch>/dist/install.yaml
-```
-
-### By providing a Helm Chart
-
-1. Build the chart using the optional helm plugin
-
-```sh
-kubebuilder edit --plugins=helm/v2-alpha
-```
-
-2. See that a chart was generated under 'dist/chart', and users
-can obtain this solution from there.
-
-**NOTE:** If you change the project, you need to update the Helm Chart
-using the same command above to sync the latest changes. Furthermore,
-if you create webhooks, you need to use the above command with
-the '--force' flag and manually ensure that any custom configuration
-previously added to 'dist/chart/values.yaml' or 'dist/chart/manager/manager.yaml'
-is manually re-applied afterwards.
-
-## Contributing
-// TODO(user): Add detailed information on how you would like others to contribute to this project
-
-**NOTE:** Run `make help` for more information on all potential `make` targets
-
-More information can be found via the [Kubebuilder Documentation](https://book.kubebuilder.io/introduction.html)
-
-## License
-
-Copyright 2026.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-
+After changing `api/`, run `make generate manifests` and commit the result. CI pushes the
+regenerated CRD into the homelab repo on merge, so the cluster never runs a stale schema.

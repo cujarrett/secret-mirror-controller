@@ -65,6 +65,32 @@ jobs:
       contents: read
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # The CRD is generated from api/, so the copy ArgoCD applies is written by
+      # CI rather than copied by hand - a stale schema in the cluster is silent.
+      - name: Push the generated CRD to homelab
+        env:
+          GH_TOKEN: ${{ secrets.HOMELAB_PAT }}
+        run: |
+          SRC="config/crd/bases/platform.local.lab_secretmirrors.yaml"
+          FILE="cluster/secret-mirror-controller/crd.yaml"
+          REPO="cujarrett/homelab"
+
+          FILE_SHA=$(gh api /repos/$REPO/contents/$FILE --jq '.sha')
+          CURRENT=$(gh api /repos/$REPO/contents/$FILE --jq '.content' | tr -d '\n' | base64 -d)
+
+          if [ "$CURRENT" = "$(cat $SRC)" ]; then
+            echo "CRD unchanged"
+            exit 0
+          fi
+
+          gh api --method PUT /repos/$REPO/contents/$FILE \
+            -f message="chore: sync secret-mirror-controller CRD" \
+            -f content="$(base64 -w 0 < $SRC)" \
+            -f sha="$FILE_SHA"
+
       - name: Update image tag in homelab
         env:
           GH_TOKEN: ${{ secrets.HOMELAB_PAT }}
