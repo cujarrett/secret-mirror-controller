@@ -83,6 +83,10 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	if err := r.pruneCopies(ctx, &mirror, targets); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	log.Info("reconciled", "source", mirror.Spec.SourceSecret, "namespaces", len(targets))
 
 	// Nothing watches Secrets or Namespaces yet, so the only way to notice a
@@ -155,6 +159,58 @@ func (r *SecretMirrorReconciler) mirrorInto(ctx context.Context, mirror *platfor
 	existing.Data = maps.Clone(source.Data)
 	log.Info("correcting drifted copy", "namespace", namespace)
 	return r.Update(ctx, &existing)
+}
+
+// pruneCopies removes copies from namespaces the selector no longer matches.
+// Namespaces are listed unfiltered and the selected ones subtracted, because a
+// namespace that stopped matching cannot be found by the selector any more.
+func (r *SecretMirrorReconciler) pruneCopies(ctx context.Context, mirror *platformv1alpha1.SecretMirror, targets []string) error {
+	log := logf.FromContext(ctx)
+
+	// A set, so the membership test below is a lookup rather than a scan of
+	// targets for every namespace in the cluster.
+	selected := make(map[string]bool, len(targets))
+	for _, ns := range targets {
+		selected[ns] = true
+	}
+
+	// Unfiltered on purpose - see the doc comment.
+	var all corev1.NamespaceList
+	if err := r.List(ctx, &all); err != nil {
+		return fmt.Errorf("list namespaces: %w", err)
+	}
+
+	// Everything below narrows the field one rule at a time. Whatever survives
+	// all four skips is a stale copy this mirror is responsible for.
+	for _, ns := range all.Items {
+		// Wanted here, or it is the source itself.
+		if selected[ns.Name] || ns.Name == mirror.Namespace {
+			continue
+		}
+
+		// Most namespaces have no Secret by this name, so NotFound here is the
+		// expected answer rather than something to retry.
+		var stale corev1.Secret
+		err := r.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: mirror.Spec.SourceSecret}, &stale)
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+
+		// Only ever delete a copy this mirror made. Rule 1 applies to deletes
+		// just as much as to writes.
+		if stale.Labels[ownerLabel] != ownerValue(mirror) {
+			continue
+		}
+
+		log.Info("pruning copy from unselected namespace", "namespace", ns.Name)
+		if err := r.Delete(ctx, &stale); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("prune from %s: %w", ns.Name, err)
+		}
+	}
+	return nil
 }
 
 func bytesEqual(a, b []byte) bool {
