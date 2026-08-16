@@ -18,7 +18,13 @@ package controller
 
 import (
 	"context"
+	"fmt"
+	"maps"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -36,22 +42,100 @@ type SecretMirrorReconciler struct {
 // +kubebuilder:rbac:groups=platform.local.lab,resources=secretmirrors,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=platform.local.lab,resources=secretmirrors/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.local.lab,resources=secretmirrors/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the SecretMirror object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.24.1/pkg/reconcile
+// Reconcile makes every selected namespace hold a copy of the source Secret.
+// It runs start to finish on every trigger and never assumes what changed.
 func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = logf.FromContext(ctx)
+	log := logf.FromContext(ctx)
 
-	// TODO(user): your logic here
+	var mirror platformv1alpha1.SecretMirror
+	if err := r.Get(ctx, req.NamespacedName, &mirror); err != nil {
+		// Already deleted - nothing to do. Step 6 gives this a real branch.
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
 
-	return ctrl.Result{}, nil
+	var source corev1.Secret
+	sourceKey := client.ObjectKey{Namespace: mirror.Namespace, Name: mirror.Spec.SourceSecret}
+	if err := r.Get(ctx, sourceKey, &source); err != nil {
+		return ctrl.Result{}, fmt.Errorf("read source secret %s: %w", sourceKey, err)
+	}
+
+	targets, err := r.selectedNamespaces(ctx, &mirror)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	for _, ns := range targets {
+		if err := r.mirrorInto(ctx, &source, ns); err != nil {
+			return ctrl.Result{}, fmt.Errorf("mirror into %s: %w", ns, err)
+		}
+	}
+
+	log.Info("reconciled", "source", mirror.Spec.SourceSecret, "namespaces", len(targets))
+
+	// Nothing watches Secrets or Namespaces yet, so the only way to notice a
+	// change out there is to look again. Step 7 replaces this with watches.
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+// selectedNamespaces returns the namespaces matching the mirror's selector,
+// minus its own - copying a Secret over itself is never wanted.
+func (r *SecretMirrorReconciler) selectedNamespaces(ctx context.Context, mirror *platformv1alpha1.SecretMirror) ([]string, error) {
+	selector, err := metav1.LabelSelectorAsSelector(&mirror.Spec.TargetNamespaceSelector)
+	if err != nil {
+		return nil, fmt.Errorf("bad targetNamespaceSelector: %w", err)
+	}
+
+	var list corev1.NamespaceList
+	if err := r.List(ctx, &list, client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return nil, fmt.Errorf("list namespaces: %w", err)
+	}
+
+	names := make([]string, 0, len(list.Items))
+	for _, ns := range list.Items {
+		if ns.Name == mirror.Namespace {
+			continue
+		}
+		names = append(names, ns.Name)
+	}
+	return names, nil
+}
+
+// mirrorInto makes one namespace hold a copy of the source: create it if it is
+// missing, correct it if it has drifted, leave it alone if it already matches.
+func (r *SecretMirrorReconciler) mirrorInto(ctx context.Context, source *corev1.Secret, namespace string) error {
+	log := logf.FromContext(ctx)
+
+	var existing corev1.Secret
+	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: source.Name}, &existing)
+	if apierrors.IsNotFound(err) {
+		dup := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: source.Name, Namespace: namespace},
+			Type:       source.Type,
+			Data:       maps.Clone(source.Data),
+		}
+		log.Info("creating copy", "namespace", namespace)
+		return r.Create(ctx, dup)
+	}
+	if err != nil {
+		return err
+	}
+
+	// Only the data is compared. A Secret's type is immutable, so a mismatch
+	// there needs a delete and recreate - not worth handling until it happens.
+	if maps.EqualFunc(existing.Data, source.Data, bytesEqual) {
+		return nil
+	}
+
+	existing.Data = maps.Clone(source.Data)
+	log.Info("correcting drifted copy", "namespace", namespace)
+	return r.Update(ctx, &existing)
+}
+
+func bytesEqual(a, b []byte) bool {
+	return string(a) == string(b)
 }
 
 // SetupWithManager sets up the controller with the Manager.
