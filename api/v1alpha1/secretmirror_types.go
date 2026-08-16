@@ -21,38 +21,35 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // SecretMirrorSpec defines the desired state of SecretMirror
 type SecretMirrorSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+	// sourceSecret is the name of the Secret to copy. It must live in the same
+	// namespace as this SecretMirror.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	SourceSecret string `json:"sourceSecret"`
 
-	// foo is an example field of SecretMirror. Edit secretmirror_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+	// targetNamespaceSelector selects the namespaces that receive a copy.
+	// An empty selector matches every namespace, so it is required rather than
+	// optional - a typo that drops the field must not fan out cluster-wide.
+	// +required
+	TargetNamespaceSelector metav1.LabelSelector `json:"targetNamespaceSelector"`
 }
 
 // SecretMirrorStatus defines the observed state of SecretMirror.
 type SecretMirrorStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// copies is the number of selected namespaces holding an up-to-date copy.
+	// +optional
+	Copies int32 `json:"copies"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// observedGeneration is the spec generation this status was calculated from.
+	// A reader compares it to metadata.generation to tell whether the status
+	// below describes the spec they are looking at.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// conditions represent the current state of the SecretMirror resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// Types used here are "Ready" and "SourceMissing".
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -61,6 +58,10 @@ type SecretMirrorStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Source",type=string,JSONPath=`.spec.sourceSecret`
+// +kubebuilder:printcolumn:name="Copies",type=integer,JSONPath=`.status.copies`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // SecretMirror is the Schema for the secretmirrors API
 type SecretMirror struct {
