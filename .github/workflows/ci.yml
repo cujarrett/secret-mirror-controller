@@ -67,6 +67,8 @@ jobs:
           context: .
           platforms: linux/arm64
           push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ghcr.io/cujarrett/secret-mirror-controller:main
             ghcr.io/cujarrett/secret-mirror-controller:sha-${{ github.sha }}
