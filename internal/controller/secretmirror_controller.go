@@ -23,8 +23,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -53,7 +55,8 @@ func ownerValue(mirror *platformv1alpha1.SecretMirror) string {
 // SecretMirrorReconciler reconciles a SecretMirror object
 type SecretMirrorReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.local.lab,resources=secretmirrors,verbs=get;list;watch;create;update;patch;delete
@@ -61,6 +64,7 @@ type SecretMirrorReconciler struct {
 // +kubebuilder:rbac:groups=platform.local.lab,resources=secretmirrors/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile makes every selected namespace hold a copy of the source Secret.
 // It runs start to finish on every trigger and never assumes what changed.
@@ -89,9 +93,21 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
+	// A missing source is reported, never acted on. Deleting copies here would
+	// turn a typo or a not-yet-created Secret into an outage in every sandbox.
 	var source corev1.Secret
 	sourceKey := client.ObjectKey{Namespace: mirror.Namespace, Name: mirror.Spec.SourceSecret}
 	if err := r.Get(ctx, sourceKey, &source); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.Recorder.Eventf(&mirror, corev1.EventTypeWarning, "SourceMissing",
+				"Secret %s not found - existing copies left untouched", sourceKey)
+			return ctrl.Result{}, r.setStatus(ctx, &mirror, mirror.Status.Copies, metav1.Condition{
+				Type:    "Ready",
+				Status:  metav1.ConditionFalse,
+				Reason:  "SourceMissing",
+				Message: fmt.Sprintf("Secret %s does not exist", sourceKey),
+			})
+		}
 		return ctrl.Result{}, fmt.Errorf("read source secret %s: %w", sourceKey, err)
 	}
 
@@ -100,19 +116,36 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	copies, conflicts := 0, []string{}
 	for _, ns := range targets {
-		if err := r.mirrorInto(ctx, &mirror, &source, ns); err != nil {
+		ok, err := r.mirrorInto(ctx, &mirror, &source, ns)
+		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("mirror into %s: %w", ns, err)
 		}
+		if ok {
+			copies++
+			continue
+		}
+		conflicts = append(conflicts, ns)
+		r.Recorder.Eventf(&mirror, corev1.EventTypeWarning, "NotOwned",
+			"Secret %s/%s exists and was not created by this mirror - left untouched", ns, source.Name)
 	}
 
 	if err := r.pruneCopies(ctx, &mirror, targets); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	log.Info("reconciled", "source", mirror.Spec.SourceSecret, "namespaces", len(targets))
+	ready := metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "InSync",
+		Message: fmt.Sprintf("%d of %d selected namespaces hold a copy", copies, len(targets))}
+	if len(conflicts) > 0 {
+		ready.Status = metav1.ConditionFalse
+		ready.Reason = "ConflictingSecrets"
+		ready.Message = fmt.Sprintf("not owned by this mirror in %v", conflicts)
+	}
 
-	return ctrl.Result{}, nil
+	log.Info("reconciled", "source", mirror.Spec.SourceSecret, "copies", copies, "conflicts", len(conflicts))
+
+	return ctrl.Result{}, r.setStatus(ctx, &mirror, int32(copies), ready)
 }
 
 // selectedNamespaces returns the namespaces matching the mirror's selector,
@@ -141,7 +174,8 @@ func (r *SecretMirrorReconciler) selectedNamespaces(ctx context.Context, mirror 
 // mirrorInto makes one namespace hold a copy of the source: create it if it is
 // missing, correct it if it has drifted, leave it alone if it already matches.
 // A Secret at the target name that this mirror does not own is never modified.
-func (r *SecretMirrorReconciler) mirrorInto(ctx context.Context, mirror *platformv1alpha1.SecretMirror, source *corev1.Secret, namespace string) error {
+// It reports false when a Secret it does not own is in the way.
+func (r *SecretMirrorReconciler) mirrorInto(ctx context.Context, mirror *platformv1alpha1.SecretMirror, source *corev1.Secret, namespace string) (bool, error) {
 	log := logf.FromContext(ctx)
 
 	var existing corev1.Secret
@@ -157,10 +191,10 @@ func (r *SecretMirrorReconciler) mirrorInto(ctx context.Context, mirror *platfor
 			Data: maps.Clone(source.Data),
 		}
 		log.Info("creating copy", "namespace", namespace)
-		return r.Create(ctx, dup)
+		return true, r.Create(ctx, dup)
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Someone else's Secret is sitting at this name. Report it and move on -
@@ -168,18 +202,28 @@ func (r *SecretMirrorReconciler) mirrorInto(ctx context.Context, mirror *platfor
 	if existing.Labels[ownerLabel] != ownerValue(mirror) {
 		log.Info("refusing to overwrite a Secret this mirror does not own",
 			"namespace", namespace, "name", source.Name, "owner", existing.Labels[ownerLabel])
-		return nil
+		return false, nil
 	}
 
 	// Only the data is compared. A Secret's type is immutable, so a mismatch
 	// there needs a delete and recreate - not worth handling until it happens.
 	if maps.EqualFunc(existing.Data, source.Data, bytesEqual) {
-		return nil
+		return true, nil
 	}
 
 	existing.Data = maps.Clone(source.Data)
 	log.Info("correcting drifted copy", "namespace", namespace)
-	return r.Update(ctx, &existing)
+	return true, r.Update(ctx, &existing)
+}
+
+// setStatus records what this reconcile found. observedGeneration is what lets a
+// reader tell whether the rest of the status describes the spec they are seeing.
+func (r *SecretMirrorReconciler) setStatus(ctx context.Context, mirror *platformv1alpha1.SecretMirror, copies int32, cond metav1.Condition) error {
+	mirror.Status.Copies = copies
+	mirror.Status.ObservedGeneration = mirror.Generation
+	cond.ObservedGeneration = mirror.Generation
+	meta.SetStatusCondition(&mirror.Status.Conditions, cond)
+	return r.Status().Update(ctx, mirror)
 }
 
 // pruneCopies removes copies from namespaces the selector no longer matches.
