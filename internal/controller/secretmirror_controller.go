@@ -33,6 +33,16 @@ import (
 	platformv1alpha1 "github.com/cujarrett/secret-mirror-controller/api/v1alpha1"
 )
 
+// ownerLabel marks a Secret as a copy this controller made. Anything at the
+// target name without it belongs to someone else and is never touched.
+const ownerLabel = "platform.local.lab/mirrored-by"
+
+// ownerValue identifies which SecretMirror made the copy. Label values cannot
+// contain a slash, so namespace and name are joined with a dot.
+func ownerValue(mirror *platformv1alpha1.SecretMirror) string {
+	return mirror.Namespace + "." + mirror.Name
+}
+
 // SecretMirrorReconciler reconciles a SecretMirror object
 type SecretMirrorReconciler struct {
 	client.Client
@@ -68,7 +78,7 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	for _, ns := range targets {
-		if err := r.mirrorInto(ctx, &source, ns); err != nil {
+		if err := r.mirrorInto(ctx, &mirror, &source, ns); err != nil {
 			return ctrl.Result{}, fmt.Errorf("mirror into %s: %w", ns, err)
 		}
 	}
@@ -105,22 +115,35 @@ func (r *SecretMirrorReconciler) selectedNamespaces(ctx context.Context, mirror 
 
 // mirrorInto makes one namespace hold a copy of the source: create it if it is
 // missing, correct it if it has drifted, leave it alone if it already matches.
-func (r *SecretMirrorReconciler) mirrorInto(ctx context.Context, source *corev1.Secret, namespace string) error {
+// A Secret at the target name that this mirror does not own is never modified.
+func (r *SecretMirrorReconciler) mirrorInto(ctx context.Context, mirror *platformv1alpha1.SecretMirror, source *corev1.Secret, namespace string) error {
 	log := logf.FromContext(ctx)
 
 	var existing corev1.Secret
 	err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: source.Name}, &existing)
 	if apierrors.IsNotFound(err) {
 		dup := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: source.Name, Namespace: namespace},
-			Type:       source.Type,
-			Data:       maps.Clone(source.Data),
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      source.Name,
+				Namespace: namespace,
+				Labels:    map[string]string{ownerLabel: ownerValue(mirror)},
+			},
+			Type: source.Type,
+			Data: maps.Clone(source.Data),
 		}
 		log.Info("creating copy", "namespace", namespace)
 		return r.Create(ctx, dup)
 	}
 	if err != nil {
 		return err
+	}
+
+	// Someone else's Secret is sitting at this name. Report it and move on -
+	// a conflict is never resolved by overwriting.
+	if existing.Labels[ownerLabel] != ownerValue(mirror) {
+		log.Info("refusing to overwrite a Secret this mirror does not own",
+			"namespace", namespace, "name", source.Name, "owner", existing.Labels[ownerLabel])
+		return nil
 	}
 
 	// Only the data is compared. A Secret's type is immutable, so a mismatch
