@@ -62,7 +62,14 @@ type SecretMirrorReconciler struct {
 // +kubebuilder:rbac:groups=platform.local.lab,resources=secretmirrors,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=platform.local.lab,resources=secretmirrors/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=platform.local.lab,resources=secretmirrors/finalizers,verbs=update
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// Secret access is granted per namespace, never cluster-wide - a controller that
+// can write a Secret anywhere can plant a fake TLS cert or pull credential in any
+// namespace. Each namespace below gets its own Role and RoleBinding. In
+// production launchpad-api renders the RoleBinding beside each sandbox namespace,
+// so access appears with the sandbox and disappears with it.
+// +kubebuilder:rbac:groups="",namespace=mirror-src,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",namespace=mirror-dst,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",namespace=mirror-dst2,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
