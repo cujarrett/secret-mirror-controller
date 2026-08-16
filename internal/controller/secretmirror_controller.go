@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -29,6 +28,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	platformv1alpha1 "github.com/cujarrett/secret-mirror-controller/api/v1alpha1"
@@ -112,9 +112,7 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	log.Info("reconciled", "source", mirror.Spec.SourceSecret, "namespaces", len(targets))
 
-	// Nothing watches Secrets or Namespaces yet, so the only way to notice a
-	// change out there is to look again. Step 7 replaces this with watches.
-	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	return ctrl.Result{}, nil
 }
 
 // selectedNamespaces returns the namespaces matching the mirror's selector,
@@ -241,10 +239,47 @@ func bytesEqual(a, b []byte) bool {
 	return string(a) == string(b)
 }
 
+// mirrorsForSecret maps a Secret event back to the mirrors that care about it -
+// the ones sourcing from it, plus the one that owns it if it is a copy.
+func (r *SecretMirrorReconciler) mirrorsForSecret(ctx context.Context, obj client.Object) []ctrl.Request {
+	var mirrors platformv1alpha1.SecretMirrorList
+	if err := r.List(ctx, &mirrors); err != nil {
+		return nil
+	}
+
+	var requests []ctrl.Request
+	for _, m := range mirrors.Items {
+		isSource := m.Namespace == obj.GetNamespace() && m.Spec.SourceSecret == obj.GetName()
+		isOurCopy := obj.GetLabels()[ownerLabel] == m.Namespace+"."+m.Name
+		if isSource || isOurCopy {
+			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&m)})
+		}
+	}
+	return requests
+}
+
+// mirrorsForNamespace enqueues every mirror on any namespace event. A namespace
+// that just lost its label no longer matches any selector, so filtering by
+// selector here would drop exactly the event that triggers a prune.
+func (r *SecretMirrorReconciler) mirrorsForNamespace(ctx context.Context, _ client.Object) []ctrl.Request {
+	var mirrors platformv1alpha1.SecretMirrorList
+	if err := r.List(ctx, &mirrors); err != nil {
+		return nil
+	}
+
+	requests := make([]ctrl.Request, 0, len(mirrors.Items))
+	for _, m := range mirrors.Items {
+		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&m)})
+	}
+	return requests
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *SecretMirrorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&platformv1alpha1.SecretMirror{}).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mirrorsForSecret)).
+		Watches(&corev1.Namespace{}, handler.EnqueueRequestsFromMapFunc(r.mirrorsForNamespace)).
 		Named("secretmirror").
 		Complete(r)
 }
