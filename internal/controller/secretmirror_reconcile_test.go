@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -37,9 +37,13 @@ import (
 // manager, so they exercise Reconcile directly and run in milliseconds.
 
 const (
-	srcNS   = "mirror-src"
-	dstNS   = "mirror-dst"
-	otherNS = "mirror-other"
+	srcNS      = "mirror-src"
+	dstNS      = "mirror-dst"
+	otherNS    = "mirror-other"
+	secretName = "hello"
+	labelKey   = "mirror-test"
+	dataKey    = "greeting"
+	labelValue = "true"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -60,11 +64,11 @@ func namespace(name string, labels map[string]string) *corev1.Namespace {
 
 func mirror() *platformv1alpha1.SecretMirror {
 	return &platformv1alpha1.SecretMirror{
-		ObjectMeta: metav1.ObjectMeta{Name: "hello", Namespace: srcNS},
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: srcNS},
 		Spec: platformv1alpha1.SecretMirrorSpec{
-			SourceSecret: "hello",
+			SourceSecret: secretName,
 			TargetNamespaceSelector: metav1.LabelSelector{
-				MatchLabels: map[string]string{"mirror-test": "true"},
+				MatchLabels: map[string]string{labelKey: labelValue},
 			},
 		},
 	}
@@ -72,12 +76,12 @@ func mirror() *platformv1alpha1.SecretMirror {
 
 func sourceSecret() *corev1.Secret {
 	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "hello", Namespace: srcNS},
-		Data:       map[string][]byte{"greeting": []byte("hi")},
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: srcNS},
+		Data:       map[string][]byte{dataKey: []byte("hi")},
 	}
 }
 
-func reconcileOnce(t *testing.T, objs ...client.Object) (*SecretMirrorReconciler, client.Client) {
+func reconcileOnce(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
 	s := testScheme(t)
 	c := fake.NewClientBuilder().
@@ -86,34 +90,36 @@ func reconcileOnce(t *testing.T, objs ...client.Object) (*SecretMirrorReconciler
 		WithStatusSubresource(&platformv1alpha1.SecretMirror{}).
 		Build()
 
-	r := &SecretMirrorReconciler{Client: c, Scheme: s, Recorder: record.NewFakeRecorder(20)}
-	req := ctrl.Request{NamespacedName: client.ObjectKey{Namespace: srcNS, Name: "hello"}}
+	r := &SecretMirrorReconciler{Client: c, Scheme: s, Recorder: events.NewFakeRecorder(20)}
+	req := ctrl.Request{NamespacedName: client.ObjectKey{Namespace: srcNS, Name: secretName}}
 	if _, err := r.Reconcile(context.Background(), req); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	return r, c
+	return c
 }
 
-func getSecret(t *testing.T, c client.Client, ns, name string) *corev1.Secret {
+// getCopy reads the mirrored Secret from the target namespace, failing the test
+// if it is absent - every caller treats a missing copy as the failure itself.
+func getCopy(t *testing.T, c client.Client) *corev1.Secret {
 	t.Helper()
 	var s corev1.Secret
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, &s); err != nil {
-		t.Fatalf("get secret %s/%s: %v", ns, name, err)
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: dstNS, Name: secretName}, &s); err != nil {
+		t.Fatalf("get secret %s/%s: %v", dstNS, secretName, err)
 	}
 	return &s
 }
 
 func TestCreatesLabelledCopyInSelectedNamespace(t *testing.T) {
-	_, c := reconcileOnce(t,
+	c := reconcileOnce(t,
 		namespace(srcNS, nil),
-		namespace(dstNS, map[string]string{"mirror-test": "true"}),
+		namespace(dstNS, map[string]string{labelKey: labelValue}),
 		sourceSecret(),
 		mirror(),
 	)
 
-	copied := getSecret(t, c, dstNS, "hello")
-	if string(copied.Data["greeting"]) != "hi" {
-		t.Errorf("data = %q, want hi", copied.Data["greeting"])
+	copied := getCopy(t, c)
+	if string(copied.Data[dataKey]) != "hi" {
+		t.Errorf("data = %q, want hi", copied.Data[dataKey])
 	}
 	if got := copied.Labels[ownerLabel]; got != srcNS+".hello" {
 		t.Errorf("owner label = %q, want %q", got, srcNS+".hello")
@@ -121,14 +127,14 @@ func TestCreatesLabelledCopyInSelectedNamespace(t *testing.T) {
 }
 
 func TestSkipsNamespaceThatDoesNotMatchSelector(t *testing.T) {
-	_, c := reconcileOnce(t,
+	c := reconcileOnce(t,
 		namespace(srcNS, nil),
 		namespace(otherNS, nil),
 		sourceSecret(),
 		mirror(),
 	)
 
-	err := c.Get(context.Background(), client.ObjectKey{Namespace: otherNS, Name: "hello"}, &corev1.Secret{})
+	err := c.Get(context.Background(), client.ObjectKey{Namespace: otherNS, Name: secretName}, &corev1.Secret{})
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("err = %v, want NotFound", err)
 	}
@@ -136,19 +142,19 @@ func TestSkipsNamespaceThatDoesNotMatchSelector(t *testing.T) {
 
 func TestNeverOverwritesASecretItDoesNotOwn(t *testing.T) {
 	theirs := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "hello", Namespace: dstNS},
+		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: dstNS},
 		Data:       map[string][]byte{"mine": []byte("donottouch")},
 	}
 
-	_, c := reconcileOnce(t,
+	c := reconcileOnce(t,
 		namespace(srcNS, nil),
-		namespace(dstNS, map[string]string{"mirror-test": "true"}),
+		namespace(dstNS, map[string]string{labelKey: labelValue}),
 		sourceSecret(),
 		theirs,
 		mirror(),
 	)
 
-	after := getSecret(t, c, dstNS, "hello")
+	after := getCopy(t, c)
 	if string(after.Data["mine"]) != "donottouch" {
 		t.Errorf("data = %q, want donottouch", after.Data["mine"])
 	}
@@ -157,22 +163,22 @@ func TestNeverOverwritesASecretItDoesNotOwn(t *testing.T) {
 func TestCorrectsDriftedCopy(t *testing.T) {
 	drifted := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "hello",
+			Name:      secretName,
 			Namespace: dstNS,
 			Labels:    map[string]string{ownerLabel: srcNS + ".hello"},
 		},
-		Data: map[string][]byte{"greeting": []byte("stale")},
+		Data: map[string][]byte{dataKey: []byte("stale")},
 	}
 
-	_, c := reconcileOnce(t,
+	c := reconcileOnce(t,
 		namespace(srcNS, nil),
-		namespace(dstNS, map[string]string{"mirror-test": "true"}),
+		namespace(dstNS, map[string]string{labelKey: labelValue}),
 		sourceSecret(),
 		drifted,
 		mirror(),
 	)
 
-	if got := string(getSecret(t, c, dstNS, "hello").Data["greeting"]); got != "hi" {
+	if got := string(getCopy(t, c).Data[dataKey]); got != "hi" {
 		t.Errorf("data = %q, want hi", got)
 	}
 }
@@ -180,14 +186,14 @@ func TestCorrectsDriftedCopy(t *testing.T) {
 func TestPrunesCopyFromNamespaceThatStoppedMatching(t *testing.T) {
 	stale := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "hello",
+			Name:      secretName,
 			Namespace: otherNS,
 			Labels:    map[string]string{ownerLabel: srcNS + ".hello"},
 		},
-		Data: map[string][]byte{"greeting": []byte("hi")},
+		Data: map[string][]byte{dataKey: []byte("hi")},
 	}
 
-	_, c := reconcileOnce(t,
+	c := reconcileOnce(t,
 		namespace(srcNS, nil),
 		namespace(otherNS, nil),
 		sourceSecret(),
@@ -195,7 +201,7 @@ func TestPrunesCopyFromNamespaceThatStoppedMatching(t *testing.T) {
 		mirror(),
 	)
 
-	err := c.Get(context.Background(), client.ObjectKey{Namespace: otherNS, Name: "hello"}, &corev1.Secret{})
+	err := c.Get(context.Background(), client.ObjectKey{Namespace: otherNS, Name: secretName}, &corev1.Secret{})
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("err = %v, want NotFound", err)
 	}
@@ -204,24 +210,24 @@ func TestPrunesCopyFromNamespaceThatStoppedMatching(t *testing.T) {
 func TestMissingSourceReportsWithoutDeletingCopies(t *testing.T) {
 	existing := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "hello",
+			Name:      secretName,
 			Namespace: dstNS,
 			Labels:    map[string]string{ownerLabel: srcNS + ".hello"},
 		},
-		Data: map[string][]byte{"greeting": []byte("hi")},
+		Data: map[string][]byte{dataKey: []byte("hi")},
 	}
 
-	_, c := reconcileOnce(t,
+	c := reconcileOnce(t,
 		namespace(srcNS, nil),
-		namespace(dstNS, map[string]string{"mirror-test": "true"}),
+		namespace(dstNS, map[string]string{labelKey: labelValue}),
 		existing,
 		mirror(),
 	)
 
-	getSecret(t, c, dstNS, "hello") // fatal if the copy was deleted
+	getCopy(t, c) // fatal if the copy was deleted
 
 	var m platformv1alpha1.SecretMirror
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: srcNS, Name: "hello"}, &m); err != nil {
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: srcNS, Name: secretName}, &m); err != nil {
 		t.Fatal(err)
 	}
 	if len(m.Status.Conditions) == 0 || m.Status.Conditions[0].Reason != "SourceMissing" {
@@ -237,29 +243,29 @@ func TestDeletionRemovesCopiesAndReleasesFinalizer(t *testing.T) {
 
 	copyInDst := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "hello",
+			Name:      secretName,
 			Namespace: dstNS,
 			Labels:    map[string]string{ownerLabel: srcNS + ".hello"},
 		},
-		Data: map[string][]byte{"greeting": []byte("hi")},
+		Data: map[string][]byte{dataKey: []byte("hi")},
 	}
 
-	_, c := reconcileOnce(t,
+	c := reconcileOnce(t,
 		namespace(srcNS, nil),
-		namespace(dstNS, map[string]string{"mirror-test": "true"}),
+		namespace(dstNS, map[string]string{labelKey: labelValue}),
 		sourceSecret(),
 		copyInDst,
 		deleting,
 	)
 
-	err := c.Get(context.Background(), client.ObjectKey{Namespace: dstNS, Name: "hello"}, &corev1.Secret{})
+	err := c.Get(context.Background(), client.ObjectKey{Namespace: dstNS, Name: secretName}, &corev1.Secret{})
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("copy err = %v, want NotFound", err)
 	}
 
 	// The fake client deletes an object once its last finalizer is removed.
 	var m platformv1alpha1.SecretMirror
-	err = c.Get(context.Background(), client.ObjectKey{Namespace: srcNS, Name: "hello"}, &m)
+	err = c.Get(context.Background(), client.ObjectKey{Namespace: srcNS, Name: secretName}, &m)
 	if err == nil && len(m.Finalizers) > 0 {
 		t.Errorf("finalizers = %v, want none", m.Finalizers)
 	}

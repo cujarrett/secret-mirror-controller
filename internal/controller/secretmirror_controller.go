@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -57,7 +57,7 @@ func ownerValue(mirror *platformv1alpha1.SecretMirror) string {
 type SecretMirrorReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
-	Recorder record.EventRecorder
+	Recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=platform.local.lab,resources=secretmirrors,verbs=get;list;watch;create;update;patch;delete
@@ -108,7 +108,7 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	sourceKey := client.ObjectKey{Namespace: mirror.Namespace, Name: mirror.Spec.SourceSecret}
 	if err := r.Get(ctx, sourceKey, &source); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.Recorder.Eventf(&mirror, corev1.EventTypeWarning, "SourceMissing",
+			r.Recorder.Eventf(&mirror, nil, corev1.EventTypeWarning, "SourceMissing", "Mirror",
 				"Secret %s not found - existing copies left untouched", sourceKey)
 			return ctrl.Result{}, r.setStatus(ctx, &mirror, mirror.Status.Copies, metav1.Condition{
 				Type:    "Ready",
@@ -136,7 +136,7 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			continue
 		}
 		conflicts = append(conflicts, ns)
-		r.Recorder.Eventf(&mirror, corev1.EventTypeWarning, "NotOwned",
+		r.Recorder.Eventf(&mirror, nil, corev1.EventTypeWarning, "NotOwned", "Mirror",
 			"Secret %s/%s exists and was not created by this mirror - left untouched", ns, source.Name)
 	}
 

@@ -207,7 +207,7 @@ func main() {
 	if err := (&controller.SecretMirrorReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("secretmirror"),
+		Recorder: mgr.GetEventRecorder("secretmirror"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "secretmirror")
 		os.Exit(1)
