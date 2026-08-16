@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	platformv1alpha1 "github.com/cujarrett/secret-mirror-controller/api/v1alpha1"
@@ -36,6 +37,12 @@ import (
 // ownerLabel marks a Secret as a copy this controller made. Anything at the
 // target name without it belongs to someone else and is never touched.
 const ownerLabel = "platform.local.lab/mirrored-by"
+
+// The mirror is the only record of which Secret was copied where, so deleting
+// it outright would strand every copy. This finalizer holds the object in the
+// API until the copies are gone. The usual answer, ownerReferences, does not
+// work here - the garbage collector ignores an owner in a different namespace.
+const finalizerName = "platform.local.lab/cleanup-copies"
 
 // ownerValue identifies which SecretMirror made the copy. Label values cannot
 // contain a slash, so namespace and name are joined with a dot.
@@ -64,6 +71,22 @@ func (r *SecretMirrorReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	if err := r.Get(ctx, req.NamespacedName, &mirror); err != nil {
 		// Already deleted - nothing to do. Step 6 gives this a real branch.
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Marked for deletion. Remove every copy, then release the finalizer so the
+	// API server can finish deleting the mirror itself.
+	if !mirror.DeletionTimestamp.IsZero() {
+		if err := r.pruneCopies(ctx, &mirror, nil); err != nil {
+			return ctrl.Result{}, err
+		}
+		controllerutil.RemoveFinalizer(&mirror, finalizerName)
+		return ctrl.Result{}, r.Update(ctx, &mirror)
+	}
+
+	if controllerutil.AddFinalizer(&mirror, finalizerName) {
+		if err := r.Update(ctx, &mirror); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	var source corev1.Secret
@@ -162,6 +185,7 @@ func (r *SecretMirrorReconciler) mirrorInto(ctx context.Context, mirror *platfor
 }
 
 // pruneCopies removes copies from namespaces the selector no longer matches.
+// Passing a nil target list removes every copy, which is what deletion needs.
 // Namespaces are listed unfiltered and the selected ones subtracted, because a
 // namespace that stopped matching cannot be found by the selector any more.
 func (r *SecretMirrorReconciler) pruneCopies(ctx context.Context, mirror *platformv1alpha1.SecretMirror, targets []string) error {
