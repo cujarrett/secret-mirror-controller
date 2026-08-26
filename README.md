@@ -9,6 +9,9 @@ hostnames that are already at Let's Encrypt's rate limit. This controller makes 
 keeps happening - a copy deleted by hand comes back, a renewed certificate propagates, and a sandbox
 that is torn down leaves nothing behind.
 
+Kyverno's [sync-secrets](https://kyverno.io/policies/other/sync-secrets/sync-secrets/) policy does
+the same job - I wanted to write a Go controller and this was the use case I actually had.
+
 ## The API
 
 ```yaml
