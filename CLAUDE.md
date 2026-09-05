@@ -9,6 +9,7 @@ See [AGENTS.md](./AGENTS.md) for project structure and kubebuilder specifics.
 - **Never output a `git push` command.**
 - **Never use em dashes.** Use a hyphen, comma, full stop, or brackets.
 - Before telling the user to commit, run `/security-review`. Report one line if clean; spend words only on real findings.
+- **Cheapest rung that works.** Before writing code go down the ladder and stop at the first rung that solves it - skip the feature, reuse code already here, standard library, native platform feature, a dependency already installed, one line, then build the minimum.
 
 ## Build
 
