@@ -3,6 +3,7 @@ See [AGENTS.md](./AGENTS.md) for project structure and kubebuilder specifics.
 ## Rules
 
 - **Never run `git add`, `git commit`, `git push`, or any git command that writes to the index, history, or remotes.** Output the commands for the user to run - staging is part of their review.
+- **Never add a `Co-Authored-By` trailer or a "Generated with Claude Code" line** to commit messages or PR descriptions, including in suggested commit messages. Commits are authored by the user alone.
 - **Always suggest a commit message** when work is ready to commit.
 - **Give `git add` and the commit as two separate steps, listing every file explicitly** - never `git add .` or a bare directory.
 - **Always precede `git add` with the `cd` to this repo's absolute path.**
