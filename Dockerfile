@@ -2,7 +2,7 @@
 # --platform=$BUILDPLATFORM keeps the compiler on the runner's own architecture and
 # cross-compiles to TARGETARCH. Without it buildx emulates the whole builder stage
 # through QEMU, which turns a two minute ARM64 build into twenty.
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG BUILDPLATFORM
