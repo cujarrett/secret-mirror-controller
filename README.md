@@ -81,7 +81,7 @@ go run ./cmd --source-namespace=demo-certs
 
 ## Development
 
-`make` is the entrypoint - see [CLAUDE.md](./CLAUDE.md) for the full table.
+`make` is the entrypoint - see [AGENTS.md](./AGENTS.md) for the full table.
 
 ```sh
 make generate manifests                       # after editing api/
