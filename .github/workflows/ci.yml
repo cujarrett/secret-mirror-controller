@@ -103,11 +103,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: Iv23liNyzLKWP1khuH23
+          private-key: ${{ secrets.HOMELAB_APP_KEY }}
+          repositories: homelab
+
       # The CRD is generated from api/, so the copy ArgoCD applies is written by
       # CI rather than copied by hand - a stale schema in the cluster is silent.
       - name: Push the generated CRD to homelab
         env:
-          GH_TOKEN: ${{ secrets.HOMELAB_DEPLOY_PAT }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           SRC="config/crd/bases/platform.local.lab_secretmirrors.yaml"
           FILE="cluster/secret-mirror-controller/crd.yaml"
@@ -128,7 +136,7 @@ jobs:
 
       - name: Update image tag in homelab
         env:
-          GH_TOKEN: ${{ secrets.HOMELAB_DEPLOY_PAT }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           FILE="cluster/secret-mirror-controller/deployment.yaml"
           IMAGE="ghcr.io/cujarrett/secret-mirror-controller"
